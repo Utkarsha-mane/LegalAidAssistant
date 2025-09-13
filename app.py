@@ -1,89 +1,119 @@
 import streamlit as st
-import fitz  # PyMuPDF for PDFs
-from docx import Document
-from sumy.parsers.plaintext import PlaintextParser
-from sumy.nlp.tokenizers import Tokenizer
-from sumy.summarizers.lex_rank import LexRankSummarizer
-from sklearn.feature_extraction.text import TfidfVectorizer
-import numpy as np
+from dotenv import load_dotenv
+from PyPDF2 import PdfReader
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.embeddings import OpenAIEmbeddings, HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_openai import OpenAI
+from langchain.memory import ConversationBufferMemory
+from langchain.chains import ConversationalRetrievalChain
+from htmlTemplates import css, bot_template, user_template, error_template, success_template, base_template
+import os
 
-# -------- CONFIG --------
-USERS = {
-    "official": "secure123",
-    "judge": "court2025",
-    "clerk": "records"
-}
 
-# -------- Helper functions --------
-def read_file(file):
-    """Read text from txt, pdf, docx"""
-    if file.name.endswith(".txt"):
-        return file.read().decode("utf-8", errors="ignore")
-    elif file.name.endswith(".pdf"):
-        pdf = fitz.open(stream=file.read(), filetype="pdf")
-        return "\n".join([page.get_text("text") for page in pdf])
-    elif file.name.endswith(".docx"):
-        doc = Document(file)
-        return "\n".join([p.text for p in doc.paragraphs])
-    return ""
 
-def summarize_text(text, sentences_count=5):
-    parser = PlaintextParser.from_string(text, Tokenizer("english"))
-    summarizer = LexRankSummarizer()
-    summary = summarizer(parser.document, sentences_count)
-    return " ".join([str(s) for s in summary])
+def get_pdf_texts(pdf_docs):
+    text = ""
+    for pdf in pdf_docs:
+        pdf_reader = PdfReader(pdf)
+        for page in pdf_reader.pages:
+            text += page.extract_text()
+    return text
 
-def answer_question(question, text):
-    docs = [text]
-    vectorizer = TfidfVectorizer().fit(docs + [question])
-    text_vec = vectorizer.transform(docs)
-    q_vec = vectorizer.transform([question])
-    scores = np.dot(text_vec, q_vec.T).toarray().ravel()
-    return "Relevant part: " + text[:500]  # crude but works for demo
+def get_text_chunks(text, chunk_size=1000, overlap=200):
+    text_splitter = CharacterTextSplitter(separator="\n", chunk_size=chunk_size, chunk_overlap=overlap, length_function=len)
+    chunks = text_splitter.split_text(text)
+    return chunks
 
-# -------- Streamlit UI --------
-st.set_page_config(page_title="Legal Case Assistant", layout="wide")
-st.title("⚖️ Legal Case Assistant (Offline Prototype)")
+def get_vectorstore(text_chunks):
+    st.write("Creating embeddings for chunks...")
+    try:
+        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        st.write("Embeddings model loaded.")
+        vectorstore = FAISS.from_texts(texts=text_chunks, embedding=embeddings)
+        st.write("Vector store created.")
+        return vectorstore
+    except Exception as e:
+        st.error(f"Error during embedding creation: {e}")
+        return None
+    
 
-# --- Login system ---
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
+def get_conversation_chain(vectorstore):
+    llm = OpenAI(
+        temperature=0.5,
+        model_name="gpt-3.5-turbo"
+    )
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    conversation_chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=vectorstore.as_retriever(),
+        memory=memory
+    )
+    return conversation_chain
 
-if not st.session_state.logged_in:
-    st.subheader("🔒 Login Required")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    if st.button("Login"):
-        if username in USERS and USERS[username] == password:
-            st.session_state.logged_in = True
-            st.success("Login successful ✅")
+
+
+
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+    conversation_chain = ConversationalRetrievalChain.from_llm(
+        llm=llm,
+        retriever=vectorstore.as_retriever(),
+        memory=memory
+    )
+    return conversation_chain
+
+def handle_userinput(user_question):
+    response = st.session_state.conversation.run({'question':user_question})
+    st.session_state.chat_history = response['chat_history']
+
+    for i, message in enumerate(st.session_state.chat_history):
+        if i % 2 == 0:
+            st.write(user_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
         else:
-            st.error("Invalid credentials ❌")
-    st.stop()
+            st.write(bot_template.replace("{{MSG}}", message.content), unsafe_allow_html=True)
 
-# --- After login ---
-st.success("Welcome, authorized official ✅")
+def main():
+    load_dotenv()
+    st.set_page_config(page_title = "Chat with pdfs", page_icon = ":page_facing_up:" )
+    st.write(css, unsafe_allow_html=True)
+    # st.write(css, unsafe_allow_html=True)
 
-# --- File Upload ---
-uploaded_file = st.file_uploader("📂 Upload a case document", type=["txt", "pdf", "docx"])
+    if "conversation" not in st.session_state:
+        st.session_state.conversation = None 
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = None
 
-if uploaded_file:
-    text = read_file(uploaded_file)
+    st.header("Case Query :page_facing_up:")
+    user_question = st.text_input("Ask questions about the document")
+    if user_question and st.session_state.conversation is not None:
+        handle_userinput(user_question)
+    elif user_question:
+        st.warning("Please upload and process a PDF first.")
 
-    st.subheader("📄 Extracted Text (first 1000 characters)")
-    st.write(text[:1000] + "...")
+    st.write(user_template.replace("{{MSG}}", "Hello Human"), unsafe_allow_html=True)
+    st.write(bot_template.replace("{{MSG}}", "Hello Human"), unsafe_allow_html=True)  
 
-    # --- Summarization ---
-    if st.button("📝 Summarize Document"):
-        with st.spinner("Summarizing..."):
-            summary = summarize_text(text)
-        st.subheader("📌 Case Summary")
-        st.write(summary)
+    with st.sidebar:
+        st.subheader("Your documents")
+        pdf_docs = st.file_uploader("Upload your pdfs here and click on 'Process'", accept_multiple_files=True)
+        if st.button("Process"):
+            with st.spinner("Processing"):
+                # get pdf text
+                raw_text = get_pdf_texts(pdf_docs)
+                st.write(raw_text)
+                # get the text chunks
+                text_chunks = get_text_chunks(raw_text)
+                st.write(text_chunks)
+                # create vector store
+                vectorstore = get_vectorstore(text_chunks)
+                if vectorstore is None:
+                    st.error("Embeddings could not be created. Check the error above and ensure all dependencies are installed.")
+                else:
+                    # conversation chain
+                    st.session_state.conversation = get_conversation_chain(vectorstore)
+    
+    
 
-    # --- Question Answering ---
-    st.subheader("💬 Ask Questions about the case")
-    question = st.text_input("Enter your question")
-    if question:
-        with st.spinner("Finding answer..."):
-            answer = answer_question(question, text)
-        st.write("**Answer:**", answer)
+
+if __name__ == "__main__":
+    main()

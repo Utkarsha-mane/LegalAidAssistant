@@ -1,16 +1,2 @@
-# Python cache
-__pycache__/
-*.pyc
-
-# Virtual environments
-.venv/
-env/
-venv/
-
-# Streamlit logs
-.streamlit/
-
-# Data files
-*.pdf
-*.docx
-
+# created by virtualenv automatically
+*
